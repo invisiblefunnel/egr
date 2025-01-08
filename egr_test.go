@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,6 +134,102 @@ func TestGoPushWait(t *testing.T) {
 		if i != consumed[i] {
 			t.Errorf("expected consumed item %d, got %d", i, consumed[i])
 		}
+	}
+}
+
+func TestIndependentContexts(t *testing.T) {
+	nItems := 10
+	nWorkers := 2
+	queueSize := nItems
+	counter := &atomic.Int32{}
+
+	ctx := context.Background()
+	a, ctxa := egr.WithContext[int](ctx, queueSize)
+	b, ctxb := egr.WithContext[int](ctx, queueSize)
+	c, ctxc := egr.WithContext[int](ctx, queueSize)
+
+	for i := 0; i < nItems; i++ {
+		err := a.Push(ctxa, i)
+		if err != nil {
+			t.Errorf("unexpected error returned from Push: %v", err)
+		}
+	}
+
+	for i := 0; i < nWorkers; i++ {
+		a.Go(func(queue <-chan int) error {
+			for item := range queue {
+				if err := b.Push(ctxb, item); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+
+	err := a.Wait()
+	if err != nil {
+		t.Errorf("unexpected error return from Wait: %v", err)
+	}
+
+	// Only a's context is canceled by Wait,
+	// we can still add goroutines to b and
+	// Push to c.
+	select {
+	case <-ctxa.Done():
+	case <-ctxb.Done():
+		t.Errorf("unexpected context cancellation: %v", ctxb.Err())
+	case <-ctxc.Done():
+		t.Errorf("unexpected context cancellation: %v", ctxc.Err())
+	default:
+		t.Error("expected a's context to be canceled")
+	}
+
+	for i := 0; i < nWorkers; i++ {
+		b.Go(func(queue <-chan int) error {
+			for item := range queue {
+				if err := c.Push(ctxc, item); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+
+	err = b.Wait()
+	if err != nil {
+		t.Errorf("unexpected error return from Wait: %v", err)
+	}
+
+	select {
+	case <-ctxb.Done():
+	case <-ctxc.Done():
+		t.Errorf("unexpected context cancellation: %v", ctxc.Err())
+	default:
+		t.Error("expected b's context to be canceled")
+	}
+
+	for i := 0; i < nWorkers; i++ {
+		c.Go(func(queue <-chan int) error {
+			for range queue {
+				counter.Add(1)
+			}
+			return nil
+		})
+	}
+
+	err = c.Wait()
+	if err != nil {
+		t.Errorf("unexpected error return from Wait: %v", err)
+	}
+
+	select {
+	case <-ctxc.Done():
+	default:
+		t.Error("expected c's context to be canceled")
+	}
+
+	if counter.Load() != int32(nItems) {
+		t.Errorf("expected %d items counted, got %d", nItems, counter.Load())
 	}
 }
 

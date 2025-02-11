@@ -233,6 +233,23 @@ func TestIndependentContexts(t *testing.T) {
 	}
 }
 
+func TestWaitMultipleCalls(t *testing.T) {
+	ctx := context.Background()
+	g, _ := egr.WithContext[int](ctx, 1)
+
+	expectedErr := errors.New("the error")
+	g.Go(func(queue <-chan int) error {
+		return expectedErr
+	})
+
+	for i := 0; i < 10; i++ {
+		actualErr := g.Wait()
+		if expectedErr != actualErr {
+			t.Fatalf("want %v, got %v", expectedErr, actualErr)
+		}
+	}
+}
+
 // BenchmarkGo measures overhead of spawning goroutines in egr.Group.
 func BenchmarkGo(b *testing.B) {
 	ctx := context.Background()

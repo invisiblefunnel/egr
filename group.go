@@ -2,6 +2,7 @@ package egr
 
 import (
 	"context"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -11,6 +12,9 @@ import (
 type Group[T any] struct {
 	group *errgroup.Group
 	queue chan T
+
+	waitOnce sync.Once
+	err      error
 }
 
 // WithContext returns a new Group[T] along with a derived context.Context.
@@ -18,7 +22,7 @@ type Group[T any] struct {
 func WithContext[T any](ctx context.Context, queueSize int) (*Group[T], context.Context) {
 	group, ctx := errgroup.WithContext(ctx)
 	queue := make(chan T, queueSize)
-	return &Group[T]{group, queue}, ctx
+	return &Group[T]{group: group, queue: queue}, ctx
 }
 
 // SetLimit limits the number of active goroutines in this group to at most n.
@@ -61,6 +65,11 @@ func (g *Group[T]) Push(ctx context.Context, item T) error {
 // Wait closes the queue channel and waits for all goroutines to complete,
 // returning the first error encountered (if any).
 func (g *Group[T]) Wait() error {
-	close(g.queue)
-	return g.group.Wait()
+	// Only do this once so Wait() is idempotent.
+	g.waitOnce.Do(func() {
+		// Close the queue and retain the result of group.Wait.
+		close(g.queue)
+		g.err = g.group.Wait()
+	})
+	return g.err
 }
